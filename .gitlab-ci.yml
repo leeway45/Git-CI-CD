@@ -1,0 +1,117 @@
+default:
+  after_script:
+    # 調整整個工作目錄權限，確保後續清理時有足夠權限
+    - sudo chown -R $(whoami) $CI_PROJECT_DIR || true
+    # 為 docker 目錄內所有目錄增加寫入權限
+    - sudo find docker -type d -exec chmod -R u+w {} \;
+    # 為 docker 目錄內所有檔案增加寫入權限
+    - sudo find docker -type f -exec chmod u+w {} \;
+    # 刪除可能因權限不足無法清除的目錄
+    - sudo rm -rf docker/.pytest_cache docker/__pycache__ || true
+    # 最後將整個工作目錄權限設為 777，避免 GitLab Runner 清理失敗
+    - sudo chmod -R 777 $CI_PROJECT_DIR || true
+
+stages:
+  - build
+  - unit test
+  - deploy1
+  - deploy2
+  - destroy
+
+build:
+  tags:
+    - g_runner
+  stage: build
+  script:
+    - cd $CI_PROJECT_DIR/docker
+    - aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com
+    - echo "Adding pytest and pytest-cov to the Docker image..."
+    - docker build --platform linux/amd64 -t dog:latest . --build-arg ADD_TEST_DEPS=true
+    - docker tag dog:latest 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:dog
+    - docker push 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:dog
+    - ls -a
+unit_test:
+  tags:
+    - g_runner
+  stage: unit test
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  before_script:
+    # 若目錄存在則調整權限，避免產生權限問題
+    - if [ -d docker/.pytest_cache ]; then sudo chown -R $(whoami) docker/.pytest_cache; fi
+    - if [ -d docker/__pycache__ ]; then sudo chown -R $(whoami) docker/__pycache__; fi
+  script:
+    - cd $CI_PROJECT_DIR/docker
+    - aws ecr get-login-password --region ap-northeast-1 | sudo docker login --username AWS --password-stdin 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com
+    - sudo dnf update -y && sudo dnf install -y python3 python3-pip
+    - pip3 install pytest pytest-cov
+    - sudo dnf install -y docker
+    - sudo service docker start
+    - sudo docker pull 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:dog
+    - ls -al
+    - rm -rf test-report.xml coverage.xml
+    - sudo docker run --rm -v $(pwd):/app -w /app dog:latest bash -c "pytest ./test_unit.py --cov=UTrun --cov-report term --cov-report xml:./coverage.xml --junitxml=./test-report.xml"
+    - ls -al
+    # 將測試報告移動到工作目錄根目錄，確保 artifact 可正確上傳
+    - mv test-report.xml $CI_PROJECT_DIR/ || echo "test-report.xml not found!"
+    - mv coverage.xml $CI_PROJECT_DIR/ || echo "coverage.xml not found!"
+  artifacts:
+    reports:
+      junit: test-report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - test-report.xml
+      - coverage.xml
+    expire_in: 1 day
+
+deploy1:
+  tags:
+    - g_runner
+  stage: deploy1
+  script:
+    - rm -rf .terraform
+    - terraform init -input=false
+    - terraform plan -out=tfplan
+    - terraform apply -auto-approve tfplan
+  artifacts:
+    paths:
+      - .terraform/
+      - .terraform.lock.hcl
+      - tfplan
+      - terraform.tfstate
+      - terraform.tfstate.backup
+    expire_in: 1 day
+  when: manual
+
+deploy2:
+  tags:
+    - g_runner
+  stage: deploy2
+  script:
+    - cd $CI_PROJECT_DIR/docker2
+    - aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com
+    - echo "Building new Docker image with tag latest..."
+    - docker build --platform linux/amd64 -t dog:latest . --build-arg ADD_TEST_DEPS=true
+    # Tag 為 for-app:dog（舊 tag，可保留參考版本）
+    - docker tag dog:latest 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:dog
+    - docker push 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:dog
+    # 同時再標記為 latest 並推送
+    - docker tag dog:latest 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:latest
+    - docker push 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:latest
+    - ls -a
+  when: manual
+
+destroy:
+  tags:
+    - g_runner
+  stage: destroy
+  script:
+    - terraform destroy -state=terraform.tfstate -auto-approve
+  when: manual
+  environment:
+    name: teardown
+    action: stop

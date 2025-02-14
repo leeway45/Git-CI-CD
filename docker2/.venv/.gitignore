@@ -1,0 +1,8 @@
+.idea/
+.venv/
+*.pyc
+__pycache__/
+docker/.pytest_cache/
+docker/__pycache__/
+docker2/.pytest_cache/
+docker2/__pycache__/
