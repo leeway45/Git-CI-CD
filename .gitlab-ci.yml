@@ -102,7 +102,7 @@ deploy2:
     # 同時再標記為 latest 並推送
     - docker tag dog:latest 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:latest
     - docker push 490004624266.dkr.ecr.ap-northeast-1.amazonaws.com/for-app:latest
-    - ls -a
+    - ls 
   when: manual
 
 destroy:
